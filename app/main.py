@@ -15,4 +15,4 @@ def listar_produtos():
     ]
 @app.get("/categorias")
 def listar_categorias():
-    return ["Periféricos", "Monitores", "Cadeiras"]
+    return ["Periféricos", "Monitores", "Cadeiras", "Acessórios"]
