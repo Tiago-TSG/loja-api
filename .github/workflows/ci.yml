@@ -62,16 +62,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Normalizar nome da imagem
+        id: image
+        run: |
+          IMAGE_REPOSITORY=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
+          echo "repository=${IMAGE_REPOSITORY}" >> "$GITHUB_OUTPUT"
+
       - name: Metadados da imagem
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.repository }}
           tags: |
             type=sha,prefix=
             type=ref,event=branch
 
-      # Cria o driver necessário para o cache de camadas do Docker Buildx
+      # Cria o driver necessário para o cache de camadas do Docker Build
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -101,17 +107,52 @@ jobs:
           token: ${{ secrets.INFRA_REPO_TOKEN }}
           path: loja-infra
 
-      - name: Instalar kustomize
+      - name: Instalar kustomize e dependências
         run: |
           curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
           sudo mv kustomize /usr/local/bin/
+          python3 -m pip install --user ruamel.yaml
 
       - name: Atualizar tag da imagem
+        env:
+          IMAGE_OWNER: ${{ github.repository_owner }}
         run: |
           cd loja-infra/apps/loja-api/overlays/staging
           SHORT_SHA=${GITHUB_SHA::7}
+          IMAGE_OWNER_LOWER=$(echo "${IMAGE_OWNER}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_REPOSITORY="ghcr.io/${IMAGE_OWNER_LOWER}/loja-api"
+          export SHORT_SHA IMAGE_REPOSITORY
+
           kustomize edit set image \
-            ghcr.io/${{ github.repository_owner }}/loja-api=ghcr.io/${{ github.repository_owner }}/loja-api:${SHORT_SHA}
+            "${IMAGE_REPOSITORY}=${IMAGE_REPOSITORY}:${SHORT_SHA}"
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from ruamel.yaml import YAML
+
+          path = Path("kustomization.yaml")
+          yaml = YAML()
+          yaml.preserve_quotes = True
+          yaml.indent(mapping=2, sequence=4, offset=2)
+
+          with path.open("r", encoding="utf-8") as fh:
+              data = yaml.load(fh) or {}
+
+          if isinstance(data, dict):
+              images = data.get("images", [])
+              if isinstance(images, list):
+                  for item in images:
+                      if isinstance(item, dict) and item.get("name", "").startswith("ghcr.io/"):
+                          item["name"] = os.environ["IMAGE_REPOSITORY"]
+                          item["newName"] = os.environ["IMAGE_REPOSITORY"]
+                          item["newTag"] = os.environ["SHORT_SHA"]
+                  data["images"] = images
+
+              with path.open("w", encoding="utf-8") as fh:
+                  yaml.dump(data, fh)
+          PY
+
           git config user.email "ci@github-actions"
           git config user.name "GitHub Actions"
           git add .
